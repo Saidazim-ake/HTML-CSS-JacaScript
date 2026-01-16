@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dr. Strange Final (Color Sync)</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; }
+        #canvas-container { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 10; }
+        
+        #input-video { 
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%; 
+            object-fit: cover; opacity: 0; z-index: -1; 
+        }
+        
+        #status {
+            position: absolute; top: 20px; left: 20px; color: #00ff00; font-family: monospace; font-size: 16px; z-index: 100;
+            background: rgba(0,0,0,0.6); padding: 5px 15px; border-radius: 5px; pointer-events: none;
+            border: 1px solid #00ff00; transition: color 0.3s, border-color 0.3s;
+        }
+        #loading {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            color: #ffaa00; font-family: sans-serif; font-size: 1.5rem; z-index: 20; text-align: center; pointer-events: none;
+            text-shadow: 0 0 20px #ff4400;
+        }
+        #instructions {
+            position: absolute; bottom: 20px; width: 100%; text-align: center; color: #ffffff; font-family: sans-serif; opacity: 0.7; z-index: 100; pointer-events: none;
+        }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+</head>
+<body>
+    <div id="status">Status: Initializing...</div>
+    <div id="loading">OPENING MULTIVERSE...<br><small>Allow Camera Access</small></div>
+    <div id="instructions">Open Hand to Summon. Pinch to Switch Spells.</div>
+    <video id="input-video"></video>
+    <div id="canvas-container"></div>
+
+<script>
+    // --- GLOBALS ---
+    let scene, camera, renderer, spellGroup;
+    let spellLayers = [], haloSprite, spellSparks;
+    let bgStars, bgStarGeo, bgStarVel = []; // Background Particles
+    
+    let sparkVel, sparkCount = 400; 
+    let targetPos = new THREE.Vector3(); 
+    let targetRot = new THREE.Quaternion();
+    let visibleScale = 0;
+    const statusDiv = document.getElementById('status');
+    
+    // --- SPELL SETTINGS ---
+    const SPELLS = [
+        { name: 'Shield', colorCore: 0xffffff, colorMid: 0xffcc00, colorOuter: 0xff6600, colorGlow: 0xff8800 },
+        { name: 'Mirror', colorCore: 0xffdddd, colorMid: 0xff4444, colorOuter: 0xaa0000, colorGlow: 0xff2222 },
+        { name: 'Time',   colorCore: 0xddeeff, colorMid: 0x55ff55, colorOuter: 0x00aa00, colorGlow: 0x00ff00 }
+    ];
+    let currentSpellIndex = 0;
+    let isPinching = false;
+    let pinchCooldown = false;
+
+    // --- 1. TEXTURE GENERATORS ---
+    function createHaloTexture() {
+        const canvas = document.createElement('canvas'); canvas.width = 128; canvas.height = 128;
+        const ctx = canvas.getContext('2d');
+        const grd = ctx.createRadialGradient(64, 64, 10, 64, 64, 64);
+        grd.addColorStop(0, 'white'); grd.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = grd; ctx.fillRect(0, 0, 128, 128);
+        return new THREE.CanvasTexture(canvas);
+    }
+
+    function createRunesTexture(type, spellName) {
+        const size = 512; const canvas = document.createElement('canvas');
+        canvas.width = size; canvas.height = size; const ctx = canvas.getContext('2d');
+        const cx = size / 2; const cy = size / 2;
+        ctx.strokeStyle = '#ffffff'; ctx.shadowBlur = 25; ctx.shadowColor = '#ffffff'; ctx.lineWidth = 4;
+        ctx.lineCap = 'round';
+
+        if (type === 'outer') {
+            if (spellName === 'Time') ctx.setLineDash([15, 10]); 
+            ctx.beginPath(); ctx.arc(cx, cy, 240, 0, Math.PI * 2); ctx.stroke();
+            
+            if (spellName === 'Mirror') {
+                 ctx.setLineDash([]); ctx.lineWidth = 2;
+                 for(let i=0; i<8; i++) {
+                    ctx.beginPath(); ctx.arc(cx + Math.cos(i*Math.PI/4)*80, cy + Math.sin(i*Math.PI/4)*80, 180, 0, Math.PI*2); ctx.stroke();
+                 }
+            } else {
+                ctx.setLineDash([]); ctx.beginPath(); ctx.arc(cx, cy, 220, 0, Math.PI * 2); ctx.stroke();
+                for(let i=0; i<36; i++) {
+                    ctx.save(); ctx.translate(cx, cy); ctx.rotate(i * (Math.PI*2/36));
+                    ctx.beginPath(); ctx.moveTo(200, 0); ctx.lineTo(215, Math.random()*5); ctx.stroke();
+                    ctx.restore();
+                }
+            }
+        } else if (type === 'middle') {
+            if(spellName === 'Mirror') {
+                 ctx.lineWidth = 3;
+                 for(let i=0; i<6; i++) {
+                    ctx.save(); ctx.translate(cx,cy); ctx.rotate(i*Math.PI/3);
+                    ctx.strokeRect(-150, -150, 300, 300); ctx.restore();
+                 }
+            } else {
+                const s = 250; ctx.lineWidth = 6;
+                ctx.strokeRect(cx-s/2, cy-s/2, s, s);
+                ctx.save(); ctx.translate(cx, cy); ctx.rotate(Math.PI/4); 
+                ctx.strokeRect(-s/2, -s/2, s, s); ctx.restore();
+            }
+        } else if (type === 'core') {
+            ctx.shadowBlur = 40; ctx.lineWidth = 8;
+            ctx.beginPath(); ctx.arc(cx, cy, 60, 0, Math.PI*2); ctx.stroke();
+            if(spellName === 'Time') {
+                 ctx.beginPath(); ctx.moveTo(cx, cy-50); ctx.lineTo(cx, cy+50); ctx.moveTo(cx-50, cy); ctx.lineTo(cx+50, cy); ctx.stroke();
+            } else {
+                 ctx.strokeRect(cx-40, cy-40, 80, 80);
+            }
+        }
+        return new THREE.CanvasTexture(canvas);
+    }
+
+    // --- 2. INITIALIZATION ---
+    function init() {
+        scene = new THREE.Scene();
+        scene.fog = new THREE.FogExp2(0x000000, 0.02);
+        camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 100);
+        camera.position.z = 20;
+        renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+        // --- MOVING BACKGROUND STARS ---
+        const bgCount = 600;
+        bgStarGeo = new THREE.BufferGeometry();
+        const bgPos = [];
+        for(let i=0; i<bgCount; i++) {
+            bgPos.push((Math.random()-0.5)*150, (Math.random()-0.5)*100, (Math.random()-0.5)*80 - 20);
+            bgStarVel.push((Math.random()-0.5)*0.05, (Math.random()-0.5)*0.05, (Math.random()-0.5)*0.02);
+        }
+        bgStarGeo.setAttribute('position', new THREE.Float32BufferAttribute(bgPos, 3));
+        
+        const bgMat = new THREE.PointsMaterial({
+            color: 0x888888, // Initial color (will update)
+            size: 0.6, 
+            transparent: true, 
+            opacity: 0.5,
+            map: new THREE.TextureLoader().load('https://assets.codepen.io/127738/dotTexture.png'),
+            blending: THREE.AdditiveBlending
+        });
+        bgStars = new THREE.Points(bgStarGeo, bgMat);
+        scene.add(bgStars);
+
+        // --- SPELL GROUP ---
+        spellGroup = new THREE.Group(); scene.add(spellGroup);
+        const baseMat = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide });
+
+        haloSprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: createHaloTexture(), blending: THREE.AdditiveBlending }));
+        haloSprite.scale.set(8, 8, 1); spellGroup.add(haloSprite);
+
+        const l1 = new THREE.Mesh(new THREE.PlaneGeometry(5,5), baseMat.clone());
+        l1.position.z = 0.2; spellLayers.push({mesh: l1, speed: 0.05, type: 'core'}); spellGroup.add(l1);
+        const l2 = new THREE.Mesh(new THREE.PlaneGeometry(9,9), baseMat.clone());
+        l2.position.z = 0.5; spellLayers.push({mesh: l2, speed: -0.02, type: 'middle'}); spellGroup.add(l2);
+        const l3 = new THREE.Mesh(new THREE.PlaneGeometry(13,13), baseMat.clone());
+        l3.position.z = 0.8; spellLayers.push({mesh: l3, speed: 0.01, type: 'outer'}); spellGroup.add(l3);
+
+        // --- SPELL SPARKS ---
+        const sGeo = new THREE.BufferGeometry(); sparkVel = new Float32Array(sparkCount * 3);
+        const sPos = new Float32Array(sparkCount * 3); for(let i=0; i<sparkCount; i++) resetSpark(sPos, sparkVel, i);
+        sGeo.setAttribute('position', new THREE.BufferAttribute(sPos, 3));
+        spellSparks = new THREE.Points(sGeo, new THREE.PointsMaterial({ color: 0xffaa00, size: 0.3, transparent: true, blending: THREE.AdditiveBlending, map: new THREE.TextureLoader().load('https://assets.codepen.io/127738/dotTexture.png') }));
+        spellGroup.add(spellSparks);
+
+        updateSpellVisuals();
+        animate();
+    }
+
+    function resetSpark(pos, vel, i) {
+        const idx = i * 3; pos[idx] = (Math.random()-0.5)*2; pos[idx+1] = (Math.random()-0.5)*2; pos[idx+2] = 0;
+        const angle = Math.random() * 6.28; const speed = 0.05 + Math.random() * 0.1;
+        vel[idx] = Math.cos(angle) * speed; vel[idx+1] = Math.sin(angle) * speed; vel[idx+2] = (Math.random()-0.5)*0.05;
+    }
+
+    function updateSpellVisuals() {
+        const s = SPELLS[currentSpellIndex];
+        
+        // 1. UI Update
+        statusDiv.innerText = "Active Spell: " + s.name.toUpperCase();
+        statusDiv.style.color = '#' + s.colorGlow.toString(16);
+        statusDiv.style.borderColor = '#' + s.colorGlow.toString(16);
+        
+        // 2. Spell Colors
+        haloSprite.material.color.setHex(s.colorCore);
+        spellLayers[0].mesh.material.color.setHex(s.colorCore);
+        spellLayers[1].mesh.material.color.setHex(s.colorMid);
+        spellLayers[2].mesh.material.color.setHex(s.colorOuter);
+        spellSparks.material.color.setHex(s.colorGlow);
+
+        // 3. BACKGROUND COLOR UPDATE (New Logic)
+        if(bgStars) {
+            bgStars.material.color.setHex(s.colorOuter);
+        }
+
+        // 4. Textures
+        spellLayers.forEach(l => {
+            if(l.mesh.material.map) l.mesh.material.map.dispose();
+            l.mesh.material.map = createRunesTexture(l.type, s.name);
+        });
+    }
+
+    function animate() {
+        requestAnimationFrame(animate);
+
+        // Spell Animation
+        spellLayers.forEach(l => l.mesh.rotation.z += l.speed);
+        const sPos = spellSparks.geometry.attributes.position.array;
+        for(let i=0; i<sparkCount; i++) {
+            const idx = i * 3; sPos[idx] += sparkVel[idx]; sPos[idx+1] += sparkVel[idx+1]; sPos[idx+2] += sparkVel[idx+2];
+            if(sPos[idx]*sPos[idx] + sPos[idx+1]*sPos[idx+1] > 60) resetSpark(sPos, sparkVel, i);
+        }
+        spellSparks.geometry.attributes.position.needsUpdate = true;
+        
+        spellGroup.position.lerp(targetPos, 0.15); 
+        spellGroup.quaternion.slerp(targetRot, 0.12);
+        
+        // Smooth Scale
+        const curS = spellGroup.scale.x; 
+        const tarS = visibleScale > 0.5 ? 1 : 0;
+        const finalS = curS + (tarS - curS) * 0.2;
+        spellGroup.scale.set(finalS, finalS, finalS);
+
+        // Background Animation (Drift & Loop)
+        if(bgStars) {
+            const bgPos = bgStars.geometry.attributes.position.array;
+            for(let i=0; i<bgPos.length/3; i++) {
+                const idx = i * 3;
+                bgPos[idx] += bgStarVel[idx];     
+                bgPos[idx+1] += bgStarVel[idx+1]; 
+                bgPos[idx+2] += bgStarVel[idx+2]; 
+
+                // Loop borders
+                if(bgPos[idx] > 75) bgPos[idx] = -75;
+                if(bgPos[idx] < -75) bgPos[idx] = 75;
+                if(bgPos[idx+1] > 50) bgPos[idx+1] = -50;
+                if(bgPos[idx+1] < -50) bgPos[idx+1] = 50;
+            }
+            bgStars.geometry.attributes.position.needsUpdate = true;
+        }
+
+        renderer.render(scene, camera);
+    }
+
+    // --- 3. TRACKING ---
+    const video = document.getElementById('input-video');
+    const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+    hands.setOptions({maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.6, minTrackingConfidence: 0.6});
+
+    hands.onResults(results => {
+        if(results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+            const lm = results.multiHandLandmarks[0];
+            targetPos.set((0.5 - lm[9].x) * 35, -(lm[9].y - 0.5) * 25, 0);
+            const angle = Math.atan2(lm[9].y - lm[0].y, lm[9].x - lm[0].x);
+            targetRot.copy(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,0,1), -angle - 1.57));
+
+            const d = Math.hypot(lm[12].x - lm[0].x, lm[12].y - lm[0].y);
+            visibleScale = d > 0.3 ? 1 : 0;
+
+            // Pinch Logic
+            const thumbTip = lm[4]; const indexTip = lm[8];
+            const pinchDist = Math.hypot(thumbTip.x - indexTip.x, thumbTip.y - indexTip.y);
+            if(pinchDist < 0.06 && visibleScale > 0.5 && !pinchCooldown) {
+                if(!isPinching) {
+                    isPinching = true;
+                    currentSpellIndex = (currentSpellIndex + 1) % SPELLS.length;
+                    updateSpellVisuals();
+                    pinchCooldown = true; setTimeout(() => { pinchCooldown = false; }, 800);
+                }
+            } else if (pinchDist > 0.1) isPinching = false;
+        } else {
+             if(visibleScale > 0) visibleScale = 0;
+        }
+    });
+
+    const cam = new Camera(video, { onFrame: async () => { await hands.send({image: video}); }, width: 1280, height: 720 });
+    cam.start().then(() => { document.getElementById('loading').style.display = 'none'; init(); })
+       .catch(e => { document.getElementById('loading').innerText = "Camera Error: " + e; });
+    window.onresize = () => { camera.aspect = window.innerWidth/window.innerHeight; camera.updateProjectionMatrix(); renderer.setSize(window.innerWidth, window.innerHeight); };
+</script>
+</body>
+</html>
