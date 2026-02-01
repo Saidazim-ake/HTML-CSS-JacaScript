@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>DOM Amaliyot</title>
+    <style>
+        #box {
+            width: 200px;
+            height: 200px;
+            background-color: gray;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 24px;
+            color: white;
+            margin: 20px 0;
+        }
+        #btn {
+            padding: 15px 30px;
+            font-size: 18px;
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="box"></div>
+    <button id="btn">Bosing</button>
+
+    <script>
+        // 1. Elementlarni tanlang
+            const box = document.getElementById('box');
+        const btn = document.getElementById('btn');
+
+
+        btn.addEventListener('click', function() {
+            box.style.backgroundColor = 'red';
+            box.textContent = 'Bosildi!';
+        });
+
+        // 2. Tugma bosilganda hodisa
+        
+    </script>
+
+</body>
+</html>
+
